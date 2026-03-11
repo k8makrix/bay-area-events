@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Event {
+  id             String   @id @default(cuid())
+  externalId     String?
+  source         String
+  title          String
+  description    String?  @db.Text
+  url            String
+  imageUrl       String?
+  startTime      DateTime
+  endTime        DateTime?
+  venueName      String?
+  venueAddress   String?
+  city           String?
+  lat            Float?
+  lng            Float?
+  category       String?
+  tags           String[]
+  isFree         Boolean  @default(false)
+  price          String?
+  relevanceScore Float?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([source, externalId])
+  @@index([startTime])
+  @@index([city])
+  @@index([source])
+}
+
+model IngestionLog {
+  id         String   @id @default(cuid())
+  source     String
+  status     String
+  eventCount Int
+  errors     String?  @db.Text
+  ranAt      DateTime @default(now())
+}

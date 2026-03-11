@@ -1,65 +1,205 @@
-import Image from "next/image";
+import Link from "next/link";
+import { prisma } from "@/lib/db";
+import {
+  getCitiesForScope,
+  getDateRange,
+  scoreEvent,
+  categorizeEvent,
+  generateMatchReason,
+  CATEGORIES,
+} from "@/lib/scoring";
+import type { NormalizedEvent } from "@/lib/types";
+import { CategorySection } from "@/components/category-section";
+import { SourceLinks } from "@/components/source-links";
+import { FreshnessBadge } from "@/components/freshness-badge";
+import { BayAreaMapWrapper } from "@/components/bay-area-map-wrapper";
 
-export default function Home() {
+const QUICK_LINKS = [
+  { label: "Today", timeframe: "today" },
+  { label: "Tomorrow", timeframe: "tomorrow" },
+  { label: "This Weekend", timeframe: "thisWeekend" },
+  { label: "Next Week", timeframe: "nextWeek" },
+];
+
+const SCOPE_LINKS = [
+  { label: "Near Me (Campbell)", scope: "local" },
+  { label: "South Bay", scope: "southBay" },
+  { label: "Full Bay Area", scope: "bayArea" },
+];
+
+const FALLBACK_SOURCES = [
+  { name: "Eventbrite", url: "https://www.eventbrite.com/d/ca--san-jose/events/", region: "South Bay" },
+  { name: "Meetup", url: "https://www.meetup.com/find/?location=us--ca--San%20Jose&source=EVENTS", region: "South Bay" },
+  { name: "DoTheBay", url: "https://dothebay.com/events/today", region: "Bay Area" },
+  { name: "Funcheap", url: "https://sf.funcheap.com/region/south-bay/", region: "South Bay" },
+  { name: "SJPL Events", url: "https://sjpl.bibliocommons.com/v2/events", region: "San Jose" },
+];
+
+async function getHomeData() {
+  const { start, end } = getDateRange("thisWeekend");
+  const cities = getCitiesForScope("southBay");
+
+  const [dbEvents, lastIngestion, eventCount] = await Promise.all([
+    prisma.event.findMany({
+      where: {
+        startTime: { gte: start, lte: end },
+        OR: [
+          { city: { in: cities, mode: "insensitive" } },
+          { city: null },
+        ],
+      },
+      orderBy: { startTime: "asc" },
+      take: 100,
+    }),
+    prisma.ingestionLog.findFirst({
+      where: { status: "success" },
+      orderBy: { ranAt: "desc" },
+    }),
+    prisma.event.count(),
+  ]);
+
+  const scored = dbEvents.map((dbEvent) => {
+    const normalized: NormalizedEvent = {
+      externalId: dbEvent.externalId || dbEvent.id,
+      source: dbEvent.source,
+      title: dbEvent.title,
+      description: dbEvent.description || undefined,
+      url: dbEvent.url,
+      imageUrl: dbEvent.imageUrl || undefined,
+      startTime: dbEvent.startTime,
+      endTime: dbEvent.endTime || undefined,
+      venueName: dbEvent.venueName || undefined,
+      venueAddress: dbEvent.venueAddress || undefined,
+      city: dbEvent.city || undefined,
+      lat: dbEvent.lat || undefined,
+      lng: dbEvent.lng || undefined,
+      tags: dbEvent.tags,
+      isFree: dbEvent.isFree,
+      price: dbEvent.price || undefined,
+    };
+
+    const relevanceScore = scoreEvent(normalized);
+    const category = categorizeEvent(normalized);
+    const matchReason = generateMatchReason(normalized, relevanceScore, category);
+
+    return {
+      id: dbEvent.id,
+      title: dbEvent.title,
+      description: dbEvent.description,
+      url: dbEvent.url,
+      imageUrl: dbEvent.imageUrl,
+      startTime: dbEvent.startTime.toISOString(),
+      endTime: dbEvent.endTime?.toISOString(),
+      venueName: dbEvent.venueName,
+      city: dbEvent.city,
+      category,
+      tags: dbEvent.tags,
+      isFree: dbEvent.isFree,
+      price: dbEvent.price,
+      relevanceScore,
+      matchReason,
+      source: dbEvent.source,
+    };
+  });
+
+  const filtered = scored
+    .filter((e) => e.relevanceScore >= 10)
+    .sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+  const lastRan = lastIngestion?.ranAt;
+  const isStale = !lastRan || Date.now() - lastRan.getTime() > 24 * 60 * 60 * 1000;
+
+  return { events: filtered, lastIngestion: lastRan?.toISOString() || null, isStale, eventCount };
+}
+
+export default async function Home() {
+  const { events, lastIngestion, isStale, eventCount } = await getHomeData();
+
+  // Group events by category
+  const grouped = CATEGORIES.reduce(
+    (acc, cat) => {
+      acc[cat] = events.filter((e) => e.category === cat);
+      return acc;
+    },
+    {} as Record<string, typeof events>
+  );
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <div>
+      {/* Hero */}
+      <section className="mb-6">
+        <h1 className="text-3xl font-bold text-foreground sm:text-4xl">
+          What&apos;s happening this weekend?
+        </h1>
+        <p className="mt-2 text-lg text-muted">
+          Tap a region to explore events — arts, comedy, food, music, and more.
+        </p>
+
+        <div className="mt-2 flex items-center gap-3">
+          <FreshnessBadge lastIngestion={lastIngestion} isStale={isStale} />
+          {eventCount > 0 && (
+            <span className="text-xs text-muted">
+              {eventCount} events tracked
+            </span>
+          )}
+        </div>
+      </section>
+
+      {/* Interactive Bay Area map */}
+      <section className="mb-6">
+        <BayAreaMapWrapper />
+      </section>
+
+      {/* Quick select */}
+      <section className="mb-6">
+        <div className="flex flex-wrap gap-2">
+          {QUICK_LINKS.map((link) => (
+            <Link
+              key={link.timeframe}
+              href={`/events?timeframe=${link.timeframe}&scope=southBay`}
+              className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-light"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+              {link.label}
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      {/* Scope select (text fallback below map) */}
+      <section className="mb-8">
+        <div className="flex flex-wrap gap-2">
+          {SCOPE_LINKS.map((link) => (
+            <Link
+              key={link.scope}
+              href={`/events?scope=${link.scope}&timeframe=thisWeekend`}
+              className="rounded-full border border-card-border bg-card-bg px-3 py-1.5 text-xs font-medium text-muted transition-colors hover:border-accent hover:text-accent"
             >
-              Learning
-            </a>{" "}
-            center.
+              {link.label}
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      {/* Stale data warning + source links */}
+      {(isStale || events.length === 0) && (
+        <section className="mb-8">
+          <SourceLinks sources={FALLBACK_SOURCES} isStale={isStale} />
+        </section>
+      )}
+
+      {/* Event listings by category */}
+      {events.length > 0 ? (
+        CATEGORIES.map((cat) => (
+          <CategorySection key={cat} category={cat} events={grouped[cat] || []} />
+        ))
+      ) : (
+        <div className="rounded-xl border border-card-border bg-card-bg p-8 text-center">
+          <p className="text-lg font-medium text-foreground">No events found yet</p>
+          <p className="mt-2 text-sm text-muted">
+            Run the ingestion script to pull in events, or browse the sources above.
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+      )}
     </div>
   );
 }
